@@ -1,102 +1,114 @@
-name: Build & Pack NuGet                # Workflow name shown in Actions UI
+# ---------------------------------------------
+# Workflow: Build & Pack a sample NuGet package
+# Behavior:
+#  - On any branch push → create prerelease artifact named <name>-v<tag>-pre-release-ci.nupkg
+#  - On main/master (or on tag push) → artifact named <name>-v<tag>.nupkg
+#  - Stores packages as GitHub Artifacts (no external publish)
+# ---------------------------------------------
+name: Build & Pack NuGet
 
-on:                                     # Triggers that start the workflow
-  push:                                 # Run on git push
-    branches: ["**"]                    # ...for pushes to ANY branch (main, master, feature/*, etc.)
-    tags: ["v*"]                        # ...and for pushes of tags that start with "v" (e.g., v1.2.3)
-  pull_request:                         # Also run for pull requests (build/pack but won’t publish)
+on:
+  push:
+    branches: ["**"]     # run for pushes to ANY branch (feature/*, main, master, etc.)
+    tags: ["v*"]         # and for annotated/ lightweight tags like v1.2.3
+  pull_request:          # PRs get built (artifacts uploaded for inspection)
 
-jobs:                                   # Collection of jobs in this workflow
-  build-pack:                           # A single job named "build-pack"
-    runs-on: ubuntu-latest              # Use GitHub-hosted Ubuntu runner
+# (Optional) keep default minimal perms; upload-artifact works with defaults.
+permissions:
+  contents: read
 
-    env:                                # Job-level environment variables
-      PACKAGE_NAME: Sample.NuGet.Demo   # 👈 change to match <PackageId> in your .csproj
-      PROJECT_PATH: src/Sample.NuGet/Sample.NuGet.csproj  # Path to your .csproj
-      ARTIFACTS_DIR: artifacts          # Where we’ll drop .nupkg/.snupkg
+jobs:
+  build-pack:
+    runs-on: ubuntu-latest
 
-    steps:                              # Ordered list of steps in the job
+    # ---- Change these to match your repo ----
+    env:
+      PACKAGE_NAME: Sample.NuGet.Demo                 # must match <PackageId> in your .csproj
+      PROJECT_PATH: src/Sample.NuGet/Sample.NuGet.csproj  # relative path to your .csproj
+      ARTIFACTS_DIR: artifacts                        # output folder for .nupkg/.snupkg
+
+    steps:
+      # Fetch source + full history + tags (needed for git describe)
       - name: Checkout
-        uses: actions/checkout@v4       # Fetch repo code
+        uses: actions/checkout@v4
         with:
-          fetch-tags: true              # Ensure git tags are available for version logic
+          fetch-depth: 0         # full history so 'git describe' works
+          fetch-tags: true       # ensure tags are available locally
 
+      # Install .NET SDKs you target (adjust as needed)
       - name: Setup .NET
-        uses: actions/setup-dotnet@v4   # Install .NET SDK(s)
+        uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: |             # Multi-line: install both 8.x and 9.x SDKs
+          dotnet-version: |
             8.x
             9.x
 
-      - name: Restore
-        run: dotnet restore             # Restore NuGet packages
-
-      - name: Build (Release)
-        run: dotnet build -c Release --no-restore  # Build in Release, skipping restore (already done)
-
-      - name: Determine TAG and VERSION
-        id: ver                         # Give this step an ID so later steps can read its outputs
-        shell: bash                     # Use bash for the inline script
-        run: |                          # Script to compute tag + semver + label
-          set -e                        # Exit immediately on error
-
-          # 1) Base TAG (prefer the pushed tag "vX.Y.Z"; else latest tag; else fallback)
-          if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" =~ ^v[0-9] ]]; then
-            TAG="${GITHUB_REF_NAME#v}" # If this run was triggered by a tag (e.g., v1.2.3), strip the 'v'
-          else
-            if git describe --tags --abbrev=0 --match "v*" >/dev/null 2>&1; then
-              LATEST="$(git describe --tags --abbrev=0 --match "v*")"  # Find the latest v* tag in repo
-              TAG="${LATEST#v}"    # Strip leading 'v'
-            else
-              TAG="0.0.${GITHUB_RUN_NUMBER}"  # Fallback if no tags exist: 0.0.<run number>
-            fi
-          fi
-
-          # 2) Is this main/master?
-          BRANCH="${GITHUB_REF_NAME}"        # Current ref name (branch or tag name)
-          if [[ "${GITHUB_REF}" == "refs/heads/main" || "${GITHUB_REF}" == "refs/heads/master" ]]; then
-            VERSION="${TAG}"                 # On main/master → version is <tag> (e.g., 1.2.3)
-            FRIENDLY="${{ env.PACKAGE_NAME }}-v${TAG}.nupkg"  # Friendly filename for artifact
-          else
-            VERSION="${TAG}-pre-release-ci"  # On any other branch → <tag>-pre-release-ci
-            FRIENDLY="${{ env.PACKAGE_NAME }}-v${TAG}-pre-release-ci.nupkg"
-          fi
-
-          echo "tag=$TAG"           >> "$GITHUB_OUTPUT"   # Expose 'tag' as step output
-          echo "version=$VERSION"   >> "$GITHUB_OUTPUT"   # Expose 'version' as step output
-          echo "friendly=$FRIENDLY" >> "$GITHUB_OUTPUT"   # Expose 'friendly' filename as step output
-
-      - name: Pack
-        run: >                                        # Create the NuGet package
-          dotnet pack "${PROJECT_PATH}"               # Pack the specified project
-          -c Release                                  # Use Release configuration
-          -o "${ARTIFACTS_DIR}"                       # Output directory for .nupkg
-          /p:PackageVersion=${{ steps.ver.outputs.version }}   # Override version computed above
-          /p:ContinuousIntegrationBuild=true          # Deterministic build/source link optimizations
-          --no-build                                  # Skip build (we already built)
-
-      - name: Show artifacts
-        run: ls -la "${ARTIFACTS_DIR}"               # List generated files for debugging/visibility
-
-      - name: Create friendly-named copy
+      # --- (Helpful) Show where we are and confirm project path exists ---
+      - name: Validate project path
         shell: bash
         run: |
           set -e
-          # The default NuGet file is <PackageId>.<version>.nupkg; compute and copy it with friendly name
-          SRC_FILE="$(ls "${ARTIFACTS_DIR}/${PACKAGE_NAME}.${{ steps.ver.outputs.version }}".nupkg)"
-          cp "$SRC_FILE" "${ARTIFACTS_DIR}/${{ steps.ver.outputs.friendly }}"
-          echo "Created: ${ARTIFACTS_DIR}/${{ steps.ver.outputs.friendly }}"
-          # (Optional) if symbols exist, copy them with a friendly name too
-          if ls "${ARTIFACTS_DIR}/${PACKAGE_NAME}.${{ steps.ver.outputs.version }}".snupkg >/dev/null 2>&1; then
-            cp "${ARTIFACTS_DIR}/${PACKAGE_NAME}.${{ steps.ver.outputs.version }}".snupkg \
-               "${ARTIFACTS_DIR}/${PACKAGE_NAME}-v${{ steps.ver.outputs.tag }}.snupkg"
+          echo "Repo root: $(pwd)"
+          echo "Looking for: $PROJECT_PATH"
+          if [[ ! -f "$PROJECT_PATH" ]]; then
+            echo "::error ::PROJECT_PATH not found. Update env.PROJECT_PATH to your .csproj"
+            echo "Top-level tree:"
+            ls -la
+            echo "Searching for .csproj up to depth 4:"
+            find . -maxdepth 4 -name "*.csproj" -print
+            exit 1
           fi
 
-      - name: Upload artifacts (NuGet packages)
-        uses: actions/upload-artifact@v4             # Store build outputs as GitHub Artifacts
-        with:
-          name: nuget-${{ github.ref_type }}-${{ github.ref_name }}  # Artifact name (contextual)
-          path: |                                     # Upload all .nupkg and .snupkg we produced
-            ${{ env.ARTIFACTS_DIR }}/*.nupkg
-            ${{ env.ARTIFACTS_DIR }}/*.snupkg
-          if-no-files-found: error                    # Fail the step if nothing to upload
+      # Restore packages for the specific project (prevents MSB1003)
+      - name: Restore
+        run: dotnet restore "${PROJECT_PATH}"
+
+      # Build in Release (skip restore since done above)
+      - name: Build (Release)
+        run: dotnet build "${PROJECT_PATH}" -c Release --no-restore
+
+      # Work out <tag> and whether this is a release (main/master/tag) or prerelease (other branches)
+      - name: Determine TAG and VERSION
+        id: ver
+        shell: bash
+        run: |
+          set -e
+
+          # Prefer the pushed tag (vX.Y.Z). Otherwise, use latest v* tag. Fallback to 0.0.<run>.
+          if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" =~ ^v[0-9] ]]; then
+            TAG="${GITHUB_REF_NAME#v}"
+          else
+            if git describe --tags --abbrev=0 --match "v*" >/dev/null 2>&1; then
+              LATEST="$(git describe --tags --abbrev=0 --match "v*")"
+              TAG="${LATEST#v}"
+            else
+              TAG="0.0.${GITHUB_RUN_NUMBER}"
+            fi
+          fi
+
+          # Decide naming mode:
+          #  - If building main/master OR building from a tag → release name (<name>-v<tag>)
+          #  - Else (any other branch) → prerelease name (<name>-v<tag>-pre-release-ci)
+          if [[ "${GITHUB_REF}" == "refs/heads/main" || "${GITHUB_REF}" == "refs/heads/master" || "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            VERSION="${TAG}"                           # semantic version inside the .nupkg
+            FRIENDLY="${PACKAGE_NAME}-v${TAG}.nupkg"   # artifact filename you asked for
+            FRIENDLY_SYM="${PACKAGE_NAME}-v${TAG}.snupkg"
+          else
+            VERSION="${TAG}-pre-release-ci"                   # semantic version inside the .nupkg
+            FRIENDLY="${PACKAGE_NAME}-v${TAG}-pre-release-ci.nupkg"
+            FRIENDLY_SYM="${PACKAGE_NAME}-v${TAG}-pre-release-ci.snupkg"
+          fi
+
+          echo "tag=$TAG"                 >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION"         >> "$GITHUB_OUTPUT"
+          echo "friendly=$FRIENDLY"       >> "$GITHUB_OUTPUT"
+          echo "friendly_sym=$FRIENDLY_SYM" >> "$GITHUB_OUTPUT"
+
+      # Create the NuGet package (.nupkg). We override PackageVersion with the value computed above.
+      - name: Pack
+        run: >
+          dotnet pack "${PROJECT_PATH}"
+          -c Release
+          -o "${ARTIFACTS_DIR}"
+          /p:PackageVersion=${{ steps.ver.outputs.version }}
+          /p:ContinuousIntegrationBuil
