@@ -1,21 +1,14 @@
 # ---------------------------------------------
 # Workflow: Build & Pack a sample NuGet package
-# Behavior:
-#  - On any branch push → version X.Y.Z-pre-release-ci and artifact <name>-v<tag>-pre-release-ci.nupkg
-#  - On main/master (or tag push) → version X.Y.Z and artifact <name>-v<tag>.nupkg
-#  - Uploads packages to:
-#      1) GitHub Actions Artifacts
-#      2) GitHub Packages (NuGet feed)  ← NEW
 # ---------------------------------------------
 name: Build & Pack NuGet
 
 on:
   push:
-    branches: ["**"]     # run for pushes to ANY branch (feature/*, main, master, etc.)
-    tags: ["v*"]         # and for tags like v1.2.3
-  pull_request:          # PRs get built (artifacts uploaded for inspection)
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
 
-# Permissions for pushing to GitHub Packages
 permissions:
   contents: read
   packages: write
@@ -24,21 +17,18 @@ jobs:
   build-pack:
     runs-on: ubuntu-latest
 
-    # ---- Change these to match your repo ----
     env:
-      PACKAGE_NAME: Sample.NuGet.Demo                     # must match <PackageId> in your .csproj
-      PROJECT_PATH: src/Sample.NuGet/Sample.NuGet.csproj  # relative path to your .csproj
-      ARTIFACTS_DIR: artifacts                            # output folder for .nupkg/.snupkg
+      PACKAGE_NAME: Sample.NuGet.Demo
+      PROJECT_PATH: src/Sample.NuGet/Sample.NuGet.csproj
+      ARTIFACTS_DIR: artifacts
 
     steps:
-      # Fetch source + full history + tags (needed for git describe)
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           fetch-tags: true
 
-      # Install .NET SDKs you target (adjust as needed)
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
@@ -46,7 +36,6 @@ jobs:
             8.x
             9.x
 
-      # --- (Helpful) Verify project path exists ---
       - name: Validate project path
         shell: bash
         run: |
@@ -60,20 +49,17 @@ jobs:
             exit 1
           fi
 
-      # Restore & build the specific project (prevents MSB1003)
       - name: Restore
         run: dotnet restore "${PROJECT_PATH}"
 
       - name: Build (Release)
         run: dotnet build "${PROJECT_PATH}" -c Release --no-restore
 
-      # Compute <tag> and version flavor
       - name: Determine TAG and VERSION
         id: ver
         shell: bash
         run: |
           set -e
-          # Prefer pushed tag vX.Y.Z → X.Y.Z; else latest v* tag; else 0.0.<run>
           if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" =~ ^v[0-9] ]]; then
             TAG="${GITHUB_REF_NAME#v}"
           else
@@ -85,7 +71,6 @@ jobs:
             fi
           fi
 
-          # main/master or tag → release; other branches → pre-release-ci
           if [[ "${GITHUB_REF}" == "refs/heads/main" || "${GITHUB_REF}" == "refs/heads/master" || "${GITHUB_REF_TYPE}" == "tag" ]]; then
             VERSION="${TAG}"
             FRIENDLY="${PACKAGE_NAME}-v${TAG}.nupkg"
@@ -101,7 +86,6 @@ jobs:
           echo "friendly=$FRIENDLY"         >> "$GITHUB_OUTPUT"
           echo "friendly_sym=$FRIENDLY_SYM" >> "$GITHUB_OUTPUT"
 
-      # Create the NuGet package (.nupkg). Override PackageVersion with computed value.
       - name: Pack
         run: >
           dotnet pack "${PROJECT_PATH}"
@@ -114,7 +98,6 @@ jobs:
       - name: Show artifacts
         run: ls -la "${ARTIFACTS_DIR}"
 
-      # Friendly file names for easy download from Artifacts
       - name: Create friendly-named copies
         shell: bash
         run: |
@@ -126,29 +109,36 @@ jobs:
             exit 1
           fi
           cp "$SRC_NUPKG" "${ARTIFACTS_DIR}/${{ steps.ver.outputs.friendly }}"
-          echo "Created friendly: ${ARTIFACTS_DIR}/${{ steps.ver.outputs.friendly }}"
           SRC_SNUPKG="${ARTIFACTS_DIR}/${PACKAGE_NAME}.${{ steps.ver.outputs.version }}.snupkg"
           if [[ -f "$SRC_SNUPKG" ]]; then
             cp "$SRC_SNUPKG" "${ARTIFACTS_DIR}/${{ steps.ver.outputs.friendly_sym }}"
-            echo "Created friendly symbols: ${ARTIFACTS_DIR}/${{ steps.ver.outputs.friendly_sym }}"
           fi
 
-      # Upload to GitHub Actions Artifacts (downloadable from the run)
+      # Compute a SAFE artifact name (no /, \, ?, *, etc.)
+      - name: Compute safe artifact name
+        id: an
+        shell: bash
+        run: |
+          set -e
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            RAW="pr-${{ github.event.number }}"
+          else
+            RAW="${{ github.ref_type }}-${{ github.ref_name }}"
+          fi
+          # Replace invalid chars with '-'
+          SAFE="$(printf "%s" "$RAW" | sed -E 's/[\"<>|:*?\\\/\r\n]+/-/g' | sed -E 's/^-+|-+$//g')"
+          echo "name=nuget-${SAFE}" >> "$GITHUB_OUTPUT"
+
       - name: Upload artifacts (NuGet packages)
         uses: actions/upload-artifact@v4
         with:
-          name: nuget-${{ github.ref_type }}-${{ github.ref_name }}
+          name: ${{ steps.an.outputs.name }}
           path: |
             ${{ env.ARTIFACTS_DIR }}/*.nupkg
             ${{ env.ARTIFACTS_DIR }}/*.snupkg
           if-no-files-found: error
 
-      # ---------------------------
-      # Publish to GitHub Packages (NuGet feed) using the repo's GITHUB_TOKEN.
-      # Runs only on 'push' (branches & tags), not on pull_request.
-      # Consumers will need a nuget.config pointing to:
-      #   https://nuget.pkg.github.com/<OWNER>/index.json
-      # ---------------------------
+      # Publish to GitHub Packages (NuGet feed) on push (branches & tags). Skips PRs.
       - name: Publish to GitHub Packages
         if: github.event_name == 'push'
         env:
