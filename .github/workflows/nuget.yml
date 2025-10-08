@@ -2,17 +2,15 @@ name: Build, Package and Publish NuGet
 
 on:
   push:
-    branches:
-      - '**'
+    branches: ['**']
   pull_request:
-    branches:
-      - '**'
+    branches: ['**']
+
 env:
-  DOTNET_VERSION: '8.X'
+  DOTNET_VERSION: '8.x'
   BUILD_CONFIGURATION: 'Release'
 
 jobs:
-
   lint:
     name: Lint and Validate
     runs-on: ubuntu-latest
@@ -21,258 +19,135 @@ jobs:
       pull-requests: write
       security-events: write
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 1
-    - name: Setup .NET
-      uses: actions/setup-dotnet@v4
-      with:
-        dotnet-version: ${{ env.DOTNET_VERSION }}
-    - name: Install dotnet format
-      run: dotnet tool install -g dotnet-format
-    - name: Restore dependencies
-      run: dotnet restore
-    - name: Check code formatting
-      id: format_check
-      run: |
-        dotnet format --verify-no-changes --verbosity diagnostic
-      continue-on-error: true
-    #- name: Validate project structure
-    #  id: validate_structure
-    #  run: |
-    #    echo "## Project Validation Results" >> $GITHUB_STEP_SUMMARY
-    #    echo "" >> $GITHUB_STEP_SUMMARY
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
-    #    VALIDATION_FAILED=0
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
 
-    #    # Check all csproj files
-    #    for csproj in $(find . -name "*.csproj" -not -path "*/obj/*" -not -path "*/bin/*"); do
-    #      echo "Validating: $csproj"
-    #      echo "### $(basename $csproj)" >> $GITHUB_STEP_SUMMARY
+      - name: Install tools (format/jq/unzip)
+        run: |
+          dotnet tool install -g dotnet-format
+          sudo apt-get update -y
+          sudo apt-get install -y jq unzip
 
-    #      # Check for required package metadata
-    #      MISSING_FIELDS=""
+      - name: Restore dependencies
+        run: dotnet restore
 
-    #      if ! grep -q "<PackageId>" "$csproj"; then
-    #        MISSING_FIELDS="$MISSING_FIELDS\n- PackageId"
-    #      fi
-          
-    #      if ! grep -q "<Version>" "$csproj"; then
-    #        MISSING_FIELDS="$MISSING_FIELDS\n- Version"
-    #      fi
-          
-    #      if ! grep -q "<Authors>" "$csproj"; then
-    #        MISSING_FIELDS="$MISSING_FIELDS\n- Authors"
-    #      fi
-          
-    #      if ! grep -q "<Description>" "$csproj"; then
-    #        MISSING_FIELDS="$MISSING_FIELDS\n- Description"
-    #      fi
+      - name: Check code formatting
+        id: format_check
+        run: dotnet format --verify-no-changes --verbosity diagnostic
+        continue-on-error: true
 
-    #      if [ -n "$MISSING_FIELDS" ]; then
-    #        echo "❌ Missing required NuGet metadata:" >> $GITHUB_STEP_SUMMARY
-    #        echo -e "$MISSING_FIELDS" >> $GITHUB_STEP_SUMMARY
-    #        VALIDATION_FAILED=1
-    #      else
-    #        echo "✅ All required metadata present" >> $GITHUB_STEP_SUMMARY
-    #      fi
-          
-    #      echo "" >> $GITHUB_STEP_SUMMARY
-    #    done
-        
-    #    if [ $VALIDATION_FAILED -eq 1 ]; then
-    #      echo "validation_status=failed" >> $GITHUB_OUTPUT
-    #      exit 1
-    #    else
-    #      echo "validation_status=passed" >> $GITHUB_OUTPUT
-    #    fi
+      - name: Build for validation
+        run: dotnet build --configuration ${{ env.BUILD_CONFIGURATION }} --no-restore
 
-    - name: Build for validation
-      run: dotnet build --configuration ${{ env.BUILD_CONFIGURATION }} --no-restore
-    - name: Run dotnet pack (dry run)
-      id: pack_validation
-      run: |
-        echo "## NuGet Package Validation" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        
-        mkdir -p ./lint-nupkgs
-        
-        # Find and pack each csproj file
-        for csproj in $(find . -name "*.csproj" -not -path "*/obj/*" -not -path "*/bin/*"); do
-          echo "Packing: $csproj"
-          dotnet pack "$csproj" --configuration ${{ env.BUILD_CONFIGURATION }} --output ./lint-nupkgs --no-build
-        done
-        
-        echo "### Generated Packages:" >> $GITHUB_STEP_SUMMARY
-        for pkg in ./lint-nupkgs/*.nupkg; do
-          if [ -f "$pkg" ]; then
-            SIZE=$(du -h "$pkg" | cut -f1)
-            echo "- ✅ $(basename $pkg) ($SIZE)" >> $GITHUB_STEP_SUMMARY
-          fi
-        done
-    - name: Analyze package contents
-      run: |
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### Package Contents Analysis:" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        
-        for pkg in ./lint-nupkgs/*.nupkg; do
-          if [ -f "$pkg" ]; then
-            echo "#### $(basename $pkg)" >> $GITHUB_STEP_SUMMARY
-            
-            # Extract and analyze package
-            TEMP_DIR=$(mktemp -d)
-            unzip -q "$pkg" -d "$TEMP_DIR"
-            
-            # Check for DLLs
-            DLL_COUNT=$(find "$TEMP_DIR" -name "*.dll" | wc -l)
-            echo "- DLLs: $DLL_COUNT" >> $GITHUB_STEP_SUMMARY
-            
-            # Check for dependencies
-            if [ -f "$TEMP_DIR/*.nuspec" ]; then
-              DEP_COUNT=$(grep -c "<dependency " "$TEMP_DIR"/*.nuspec || echo "0")
-              echo "- Dependencies: $DEP_COUNT" >> $GITHUB_STEP_SUMMARY
+      - name: Run dotnet pack (dry run)
+        id: pack_validation
+        run: |
+          echo "## NuGet Package Validation" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          mkdir -p ./lint-nupkgs
+          for csproj in $(find . -name "*.csproj" -not -path "*/obj/*" -not -path "*/bin/*"); do
+            echo "Packing: $csproj"
+            dotnet pack "$csproj" --configuration ${{ env.BUILD_CONFIGURATION }} --output ./lint-nupkgs --no-build
+          done
+
+          echo "### Generated Packages:" >> $GITHUB_STEP_SUMMARY
+          for pkg in ./lint-nupkgs/*.nupkg; do
+            if [ -f "$pkg" ]; then
+              SIZE=$(du -h "$pkg" | cut -f1)
+              echo "- ✅ $(basename "$pkg") ($SIZE)" >> $GITHUB_STEP_SUMMARY
             fi
-            
-            # Check package size
-            SIZE=$(du -h "$pkg" | cut -f1)
-            echo "- Size: $SIZE" >> $GITHUB_STEP_SUMMARY
-            
-            rm -rf "$TEMP_DIR"
-            echo "" >> $GITHUB_STEP_SUMMARY
-          fi
-        done
-    - name: Check for security vulnerabilities
-      run: |
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "## Security Audit" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        
-        dotnet list package --vulnerable --include-transitive 2>&1 | tee vulnerability-report.txt
-        
-        if grep -q "has the following vulnerable packages" vulnerability-report.txt; then
-          echo "⚠️ **Vulnerable packages detected!**" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          cat vulnerability-report.txt >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-        else
-          echo "✅ No vulnerable packages detected" >> $GITHUB_STEP_SUMMARY
-        fi
-    - name: Check for deprecated packages
-      run: |
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "## Deprecated Packages Check" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        
-        dotnet list package --deprecated 2>&1 | tee deprecated-report.txt
-        
-        if grep -q "The following sources were used" deprecated-report.txt; then
-          if grep -q "Deprecated" deprecated-report.txt; then
-            echo "⚠️ **Deprecated packages found!**" >> $GITHUB_STEP_SUMMARY
+          done
+
+      - name: Analyze package contents
+        run: |
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Package Contents Analysis:" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          for pkg in ./lint-nupkgs/*.nupkg; do
+            if [ -f "$pkg" ]; then
+              echo "#### $(basename "$pkg")" >> $GITHUB_STEP_SUMMARY
+              TEMP_DIR=$(mktemp -d)
+              unzip -q "$pkg" -d "$TEMP_DIR"
+
+              DLL_COUNT=$(find "$TEMP_DIR" -name "*.dll" | wc -l || true)
+              echo "- DLLs: $DLL_COUNT" >> $GITHUB_STEP_SUMMARY
+
+              NUSPEC=$(ls "$TEMP_DIR"/*.nuspec 2>/dev/null | head -n1 || true)
+              if [ -n "$NUSPEC" ]; then
+                DEP_COUNT=$(grep -c "<dependency " "$NUSPEC" || echo "0")
+                echo "- Dependencies: $DEP_COUNT" >> $GITHUB_STEP_SUMMARY
+              fi
+
+              SIZE=$(du -h "$pkg" | cut -f1)
+              echo "- Size: $SIZE" >> $GITHUB_STEP_SUMMARY
+
+              rm -rf "$TEMP_DIR"
+              echo "" >> $GITHUB_STEP_SUMMARY
+            fi
+          done
+
+      - name: Check for security vulnerabilities
+        run: |
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Security Audit" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          dotnet list package --vulnerable --include-transitive 2>&1 | tee vulnerability-report.txt
+          if grep -q "has the following vulnerable packages" vulnerability-report.txt; then
+            echo "⚠️ **Vulnerable packages detected!**" >> $GITHUB_STEP_SUMMARY
             echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-            cat deprecated-report.txt >> $GITHUB_STEP_SUMMARY
+            cat vulnerability-report.txt >> $GITHUB_STEP_SUMMARY
             echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
           else
-            echo "✅ No deprecated packages found" >> $GITHUB_STEP_SUMMARY
+            echo "✅ No vulnerable packages detected" >> $GITHUB_STEP_SUMMARY
           fi
-        fi
-    - name: Scan packages for embedded secrets
-      run: |
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "## Package Secret Scan" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        
-        # Extract and scan each package
-        for pkg in ./lint-nupkgs/*.nupkg; do
-          if [ -f "$pkg" ]; then
-            TEMP_DIR=$(mktemp -d)
-            unzip -q "$pkg" -d "$TEMP_DIR"
-            
-            echo "Scanning $(basename $pkg)..." >> $GITHUB_STEP_SUMMARY
-            
-            # Use gitleaks to scan extracted package contents
-            docker run --rm -v "$TEMP_DIR:/scan" ghcr.io/gitleaks/gitleaks:latest detect --source="/scan" --no-git --report-format=json --report-path=/scan/pkg-leaks.json || true
-            
-            if [ -f "$TEMP_DIR/pkg-leaks.json" ]; then
-              LEAK_COUNT=$(jq '. | length' "$TEMP_DIR/pkg-leaks.json")
-              if [ "$LEAK_COUNT" -gt 0 ]; then
-                echo "❌ **$(basename $pkg)**: $LEAK_COUNT potential secret(s) found in package!" >> $GITHUB_STEP_SUMMARY
-              else
-                echo "✅ **$(basename $pkg)**: Clean" >> $GITHUB_STEP_SUMMARY
-              fi
-            else
-              echo "✅ **$(basename $pkg)**: Clean" >> $GITHUB_STEP_SUMMARY
-            fi
-            
-            rm -rf "$TEMP_DIR"
-          fi
-        done
-    - name: Upload lint artifacts
-      uses: actions/upload-artifact@v4
-      if: always()
-      with:
-        name: lint-validation-packages
-        path: ./lint-nupkgs/
-    - name: Comment PR with results
-      if: github.event_name == 'pull_request'
-      uses: actions/github-script@v7
-      with:
-        github-token: ${{ secrets.GITHUB_TOKEN }}  # Use GITHUB_TOKEN instead
-        script: |
-          const fs = require('fs');
-          
-          let comment = '## 🔍 NuGet Package Lint Results\n\n';
-          
-          // Format check
-          if ('${{ steps.format_check.outcome }}' === 'failure') {
-            comment += '❌ **Code formatting issues detected**\n';
-            comment += 'Please run `dotnet format` to fix formatting issues.\n\n';
-          } else {
-            comment += '✅ Code formatting passed\n\n';
-          }
-          
-          // Validation check
-          if ('${{ steps.validate_structure.outputs.validation_status }}' === 'failed') {
-            comment += '❌ **Project validation failed**\n';
-            comment += 'Check the workflow summary for details about missing metadata.\n\n';
-          } else {
-            comment += '✅ Project validation passed\n\n';
-          }
-          
-          // Pack validation
-          if ('${{ steps.pack_validation.outcome }}' === 'success') {
-            comment += '✅ Package creation validation passed\n\n';
-          } else {
-            comment += '❌ **Package creation failed**\n\n';
-          }
-          
-          comment += '\n📊 View detailed results in the [workflow summary](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})';
-          
-          // Check if comment already exists
-          const { data: comments } = await github.rest.issues.listComments({
-            issue_number: context.issue.number,
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-          });
-          
-          const existingComment = comments.find(c => c.body.includes('🔍 NuGet Package Lint Results'));
-          
-          if (existingComment) {
-            await github.rest.issues.updateComment({
-              comment_id: existingComment.id,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: comment
-            });
-          } else {
-            await github.rest.issues.createComment({
+
+      - name: Upload lint artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lint-validation-packages
+          path: ./lint-nupkgs/
+
+      - name: Comment PR with results
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            let comment = '## 🔍 NuGet Package Lint Results\n\n';
+            comment += ('${{ steps.format_check.outcome }}' === 'failure')
+              ? '❌ **Code formatting issues detected**. Please run `dotnet format`.\n\n'
+              : '✅ Code formatting passed\n\n';
+            comment += ('${{ steps.pack_validation.outcome }}' === 'success')
+              ? '✅ Package creation validation passed\n\n'
+              : '❌ **Package creation failed**\n\n';
+            comment += `\n📊 View details in the [workflow summary](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})`;
+
+            const { data: comments } = await github.rest.issues.listComments({
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: comment
             });
-          }
+            const existing = comments.find(c => c.body.includes('🔍 NuGet Package Lint Results'));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                comment_id: existing.id, owner: context.repo.owner, repo: context.repo.repo, body: comment
+              });
+            } else {
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number, owner: context.repo.owner, repo: context.repo.repo, body: comment
+              });
+            }
 
   build:
     name: Build and Publish
@@ -283,20 +158,20 @@ jobs:
       pull-requests: write
       packages: write
     env:
-      DOTNET_VERSION: '8.x'           # ⇦ set if not defined at workflow level
-      BUILD_CONFIGURATION: 'Release'  # ⇦ set if not defined at workflow level
+      DOTNET_VERSION: '8.x'
+      BUILD_CONFIGURATION: 'Release'
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
-  
+
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
-  
-      # NEW: parse bump from commit/PR message (supports "patch : something", "minor: ...", "MAJOR : ...")
+
+      # Parse bump from commit/PR message (supports "patch : something", "minor: ...", "MAJOR : ...")
       - name: Determine version bump from commit/PR message
         id: commit_bump
         run: |
@@ -306,14 +181,13 @@ jobs:
           else
             MSG="$(git show -s --format=%B $GITHUB_SHA)"
           fi
-  
-          # only the first non-empty line
+
           FIRST_LINE="$(printf "%s" "$MSG" | sed -E '/^\s*$/d;q')"
           LOW="$(printf "%s" "$FIRST_LINE" | tr '[:upper:]' '[:lower:]')"
-  
+
           echo "Raw first line considered:" >> $GITHUB_STEP_SUMMARY
           printf "\n\`\`\`\n%s\n\`\`\`\n" "$FIRST_LINE" >> $GITHUB_STEP_SUMMARY
-  
+
           if printf "%s" "$LOW" | grep -Eq '^\s*major\s*:'; then
             BUMP=major
           elif printf "%s" "$LOW" | grep -Eq '^\s*minor\s*:'; then
@@ -321,23 +195,22 @@ jobs:
           elif printf "%s" "$LOW" | grep -Eq '^\s*patch\s*:'; then
             BUMP=patch
           else
-            echo "::error title=Missing bump directive::Commit/PR message must start with one of: 'major:', 'minor:', or 'patch:' (spaces around ':' are allowed)."
+            echo "::error title=Missing bump directive::Commit/PR message must start with one of: 'major:', 'minor:', or 'patch:' (spaces around ':' allowed)."
             echo "Examples:" >> $GITHUB_STEP_SUMMARY
-            echo "- \`major : drop old auth API\`" >> $GITHUB_STEP_SUMMARY
+            echo "- \`major : breaking change\`" >> $GITHUB_STEP_SUMMARY
             echo "- \`minor: add export endpoint\`" >> $GITHUB_STEP_SUMMARY
             echo "- \`patch : update few CS files\`" >> $GITHUB_STEP_SUMMARY
             exit 1
           fi
-  
+
           echo "bump=$BUMP" >> $GITHUB_OUTPUT
           echo "- Bump: **$BUMP**" >> $GITHUB_STEP_SUMMARY
-  
-      # Keep your branch strategy (default branch → stable, others → prerelease suffix)
+
+      # Branch strategy: default branch → stable; others → prerelease suffix
       - name: Determine version strategy
         id: version
         run: |
           DATE=$(date +'%Y%m%d%H%M%S')
-  
           if [[ "${{ github.ref }}" == "refs/heads/master" ]] || [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
             IS_DEFAULT_BRANCH="true"
             echo "version_suffix=" >> $GITHUB_OUTPUT
@@ -347,14 +220,10 @@ jobs:
             echo "version_suffix=pre-release-$DATE" >> $GITHUB_OUTPUT
             echo "build_version_suffix=--version-suffix pre-release-$DATE" >> $GITHUB_OUTPUT
           fi
-  
           echo "date=$DATE" >> $GITHUB_OUTPUT
           echo "is_default_branch=$IS_DEFAULT_BRANCH" >> $GITHUB_OUTPUT
-  
-          echo "Branch: ${{ github.ref }}"
-          echo "Is default branch: $IS_DEFAULT_BRANCH"
-  
-      # UPDATED: compute new version per csproj using chosen bump (only on default branch)
+
+      # Compute new version from latest on GH Packages (only on default branch)
       - name: Get latest package version from GitHub Packages
         id: get_version
         if: steps.version.outputs.is_default_branch == 'true'
@@ -363,20 +232,19 @@ jobs:
         run: |
           echo "## Version Increment Process" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-  
+
           for csproj in $(find . -name "*.csproj" -not -path "*/obj/*" -not -path "*/bin/*"); do
             PACKAGE_NAME=$(grep -oPm1 "(?<=<PackageId>)[^<]+" "$csproj" || basename "$csproj" .csproj)
-  
+
             echo "### Processing: $PACKAGE_NAME" >> $GITHUB_STEP_SUMMARY
-            echo "Checking version for package: $PACKAGE_NAME"
-  
+
             RESPONSE=$(curl -s -w "\n%{http_code}" -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
               -H "Accept: application/vnd.github+json" \
               "https://api.github.com/orgs/${{ github.repository_owner }}/packages/nuget/$PACKAGE_NAME/versions")
-  
+
             HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
             BODY=$(echo "$RESPONSE" | head -n-1)
-  
+
             if [ "$HTTP_CODE" != "200" ]; then
               RESPONSE=$(curl -s -w "\n%{http_code}" -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
                 -H "Accept: application/vnd.github+json" \
@@ -384,120 +252,100 @@ jobs:
               HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
               BODY=$(echo "$RESPONSE" | head -n-1)
             fi
-  
+
             if [ "$HTTP_CODE" = "200" ]; then
               LATEST_VERSION=$(echo "$BODY" | jq -r 'first(.[] | select(.metadata.package_type == "nuget")) | .name // "0.0.0"')
               echo "- API Status: ✅ Success (HTTP $HTTP_CODE)" >> $GITHUB_STEP_SUMMARY
             else
-              echo "Could not fetch versions from GitHub Packages (HTTP $HTTP_CODE)"
               echo "- API Status: ⚠️ Failed (HTTP $HTTP_CODE)" >> $GITHUB_STEP_SUMMARY
               LATEST_VERSION="0.0.0"
             fi
-  
-            # base (strip any pre-release suffix like "-rc.1")
+
             LATEST_VERSION_BASE=$(printf "%s" "$LATEST_VERSION" | sed -E 's/-.*$//')
             if [ "$LATEST_VERSION_BASE" = "0.0.0" ] || [ -z "$LATEST_VERSION_BASE" ]; then
               BASE_VERSION=$(grep -oPm1 "(?<=<Version>)[^<]+" "$csproj" || echo "1.0.0")
             else
               BASE_VERSION="$LATEST_VERSION_BASE"
             fi
-  
+
             IFS='.' read -r MAJOR MINOR PATCH <<< "$BASE_VERSION"
             PATCH=$(echo "$PATCH" | grep -oE '^[0-9]+' || echo "0")
-  
+
             case "$BUMP" in
               major) NEW_VERSION="$((MAJOR+1)).0.0" ;;
               minor) NEW_VERSION="$MAJOR.$((MINOR+1)).0" ;;
               patch) NEW_VERSION="$MAJOR.$MINOR.$((PATCH+1))" ;;
               *) echo "::error::Unknown bump '$BUMP'"; exit 1 ;;
             esac
-  
-            echo "- Latest Published Version: \`$LATEST_VERSION\`" >> $GITHUB_STEP_SUMMARY
-            echo "- Base for Bump: \`$BASE_VERSION\`" >> $GITHUB_STEP_SUMMARY
-            echo "- Calculated New Version (**$BUMP**): \`$NEW_VERSION\`" >> $GITHUB_STEP_SUMMARY
-  
+
+            echo "- Latest Published: \`$LATEST_VERSION\`" >> $GITHUB_STEP_SUMMARY
+            echo "- Base for bump: \`$BASE_VERSION\`" >> $GITHUB_STEP_SUMMARY
+            echo "- New Version (**$BUMP**): \`$NEW_VERSION\`" >> $GITHUB_STEP_SUMMARY
+
             if grep -q "<Version>" "$csproj"; then
               sed -i "s|<Version>.*</Version>|<Version>$NEW_VERSION</Version>|" "$csproj"
-              echo "- Action: Updated existing <Version> tag" >> $GITHUB_STEP_SUMMARY
             else
               sed -i "0,/<PropertyGroup>/s|<PropertyGroup>|<PropertyGroup>\n    <Version>$NEW_VERSION</Version>|" "$csproj"
-              echo "- Action: Added new <Version> tag" >> $GITHUB_STEP_SUMMARY
             fi
-  
-            echo "Updated $csproj to version $NEW_VERSION"
-            echo "" >> $GITHUB_STEP_SUMMARY
           done
-  
+
       - name: Verify version updates
         if: steps.version.outputs.is_default_branch == 'true'
         run: |
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "## Final Project Versions" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-  
           for csproj in $(find . -name "*.csproj" -not -path "*/obj/*" -not -path "*/bin/*"); do
             VERSION=$(grep -oPm1 "(?<=<Version>)[^<]+" "$csproj" || echo "NOT SET")
             PACKAGE_ID=$(grep -oPm1 "(?<=<PackageId>)[^<]+" "$csproj" || basename "$csproj" .csproj)
             echo "- **$PACKAGE_ID**: \`$VERSION\`" >> $GITHUB_STEP_SUMMARY
-            echo "Project: $PACKAGE_ID - Version: $VERSION"
           done
-  
-      - name: Restore dependencies
+
+      - name: Restore
         run: dotnet restore
-  
+
       - name: Build
         run: dotnet build --configuration ${{ env.BUILD_CONFIGURATION }} --no-restore
-  
-      - name: Publish
-        run: |
-          mkdir -p ./publish
-          for csproj in $(find . -name "*.csproj" -not -path "*/obj/*" -not -path "*/bin/*"); do
-            echo "Publishing: $csproj"
-            dotnet publish "$csproj" --configuration ${{ env.BUILD_CONFIGURATION }} --output ./publish --no-build
-          done
-  
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        if: success() || failure()
-        with:
-          name: published-app-${{ steps.version.outputs.date }}
-          path: ./publish
-  
+
       - name: Pack NuGet packages
         run: |
           mkdir -p ./nupkgs
-  
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "## NuGet Package Creation" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-  
+
           for csproj in $(find . -name "*.csproj" -not -path "*/obj/*" -not -path "*/bin/*"); do
             echo "Packing: $csproj"
             if [ "${{ steps.version.outputs.is_default_branch }}" = "true" ]; then
               dotnet pack "$csproj" --configuration ${{ env.BUILD_CONFIGURATION }} --output ./nupkgs --no-build
             else
+              # Will produce 1.0.0-pre-release-<DATE> if <Version> is not set in the csproj
               dotnet pack "$csproj" --configuration ${{ env.BUILD_CONFIGURATION }} --output ./nupkgs --no-build ${{ steps.version.outputs.build_version_suffix }}
             fi
           done
-  
+
           for pkg in ./nupkgs/*.nupkg; do
             if [ -f "$pkg" ]; then
               SIZE=$(du -h "$pkg" | cut -f1)
               echo "- ✅ \`$(basename "$pkg")\` ($SIZE)" >> $GITHUB_STEP_SUMMARY
             fi
           done
-  
+
       - name: List generated packages
         run: ls -la ./nupkgs/
-  
+
       - name: Push to GitHub Packages
         run: |
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "## Package Publishing Results" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-  
-          dotnet nuget add source --username ${{ github.actor }} --password ${{ secrets.GITHUB_TOKEN }} --store-password-in-clear-text --name github "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json"
-  
+
+          dotnet nuget add source \
+            --username ${{ github.actor }} \
+            --password ${{ secrets.GITHUB_TOKEN }} \
+            --store-password-in-clear-text \
+            --name github "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json"
+
           for pkg in ./nupkgs/*.nupkg; do
             if [ -f "$pkg" ]; then
               echo "Pushing $(basename "$pkg")..."
@@ -513,4 +361,3 @@ jobs:
             fi
           done
         continue-on-error: ${{ steps.version.outputs.is_default_branch == 'false' }}
-
