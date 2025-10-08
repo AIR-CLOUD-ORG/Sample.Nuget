@@ -19,7 +19,7 @@ jobs:
 
     env:
       PACKAGE_NAME: Sample.NuGet.Demo
-      PROJECT_PATH: src/Sample.NuGet/Sample.NuGet.csproj
+      PROJECT_PATH: Sample.NuGet.csproj
       ARTIFACTS_DIR: artifacts
 
     steps:
