@@ -48,7 +48,7 @@ jobs:
         VALIDATION_FAILED=0
 
         # Check all csproj files
-        for csproj in $(find , -name "*.csproj" -not -path "*/obj/*" -not -path "*/bin/*"); do
+        for csproj in $(find . -name "*.csproj" -not -path "*/obj/*" -not -path "*/bin/*"); do
           echo "Validating: $csproj"
           echo "### $(basename $csproj)" >> $GITHUB_STEP_SUMMARY
 
