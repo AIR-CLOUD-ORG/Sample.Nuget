@@ -153,10 +153,14 @@ jobs:
     name: Build and Publish
     runs-on: ubuntu-latest
     needs: lint
+    if: github.event_name == 'pull_request'   # use PR title only
     permissions:
       contents: read
       pull-requests: write
       packages: write
+    outputs:
+      existing_latest_version: ${{ steps.get_version.outputs.existing_latest_version }}
+      new_version: ${{ steps.get_version.outputs.new_version }}
     env:
       DOTNET_VERSION: '8.x'
       BUILD_CONFIGURATION: 'Release'
@@ -171,22 +175,21 @@ jobs:
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
-      # Parse bump from commit/PR message (supports "patch : something", "minor: ...", "MAJOR : ...")
-      - name: Determine version bump from commit/PR message
+      - name: Install jq (needed for API parsing)
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y jq
+
+      # Parse bump **only from PR TITLE**
+      - name: Determine version bump from PR title
         id: commit_bump
         run: |
+          TITLE="${{ github.event.pull_request.title }}"
+          LOW="$(printf "%s" "$TITLE" | tr '[:upper:]' '[:lower:]')"
+
           echo "## Version Bump Source" >> $GITHUB_STEP_SUMMARY
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            MSG="${{ github.event.pull_request.title }} ${{ github.event.pull_request.body }}"
-          else
-            MSG="$(git show -s --format=%B $GITHUB_SHA)"
-          fi
-
-          FIRST_LINE="$(printf "%s" "$MSG" | sed -E '/^\s*$/d;q')"
-          LOW="$(printf "%s" "$FIRST_LINE" | tr '[:upper:]' '[:lower:]')"
-
-          echo "Raw first line considered:" >> $GITHUB_STEP_SUMMARY
-          printf "\n\`\`\`\n%s\n\`\`\`\n" "$FIRST_LINE" >> $GITHUB_STEP_SUMMARY
+          echo "PR Title:" >> $GITHUB_STEP_SUMMARY
+          printf "\n\`\`\`\n%s\n\`\`\`\n" "$TITLE" >> $GITHUB_STEP_SUMMARY
 
           if printf "%s" "$LOW" | grep -Eq '^\s*major\s*:'; then
             BUMP=major
@@ -195,7 +198,7 @@ jobs:
           elif printf "%s" "$LOW" | grep -Eq '^\s*patch\s*:'; then
             BUMP=patch
           else
-            echo "::error title=Missing bump directive::Commit/PR message must start with one of: 'major:', 'minor:', or 'patch:' (spaces around ':' allowed)."
+            echo "::error title=Missing bump directive::PR title must start with one of: 'major:', 'minor:', or 'patch:' (spaces around ':' allowed)."
             echo "Examples:" >> $GITHUB_STEP_SUMMARY
             echo "- \`major : breaking change\`" >> $GITHUB_STEP_SUMMARY
             echo "- \`minor: add export endpoint\`" >> $GITHUB_STEP_SUMMARY
@@ -223,19 +226,32 @@ jobs:
           echo "date=$DATE" >> $GITHUB_OUTPUT
           echo "is_default_branch=$IS_DEFAULT_BRANCH" >> $GITHUB_OUTPUT
 
-      # Compute new version from latest on GH Packages (only on default branch)
-      - name: Get latest package version from GitHub Packages
+      # Get latest version, compute new one, expose outputs; resolve PACKAGE_NAME via MSBuild (no grep)
+      - name: Get latest package version & compute new version
         id: get_version
-        if: steps.version.outputs.is_default_branch == 'true'
         env:
           BUMP: ${{ steps.commit_bump.outputs.bump }}
+          IS_DEFAULT_BRANCH: ${{ steps.version.outputs.is_default_branch }}
         run: |
           echo "## Version Increment Process" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
 
-          for csproj in $(find . -name "*.csproj" -not -path "*/obj/*" -not -path "*/bin/*"); do
-            PACKAGE_NAME=$(grep -oPm1 "(?<=<PackageId>)[^<]+" "$csproj" || basename "$csproj" .csproj)
+          # helper to resolve effective PackageId -> AssemblyName -> file name
+          get_pkg_name () {
+            local csproj="$1"
+            local val
+            val="$(dotnet msbuild "$csproj" -nologo -v:quiet -getProperty:PackageId | tr -d '\r')"
+            if [ -z "$val" ]; then
+              val="$(dotnet msbuild "$csproj" -nologo -v:quiet -getProperty:AssemblyName | tr -d '\r')"
+            fi
+            if [ -z "$val" ]; then
+              val="$(basename "$csproj" .csproj)"
+            fi
+            printf '%s\n' "$val"
+          }
 
+          for csproj in $(find . -name "*.csproj" -not -path "*/obj/*" -not -path "*/bin/*"); do
+            PACKAGE_NAME="$(get_pkg_name "$csproj")"
             echo "### Processing: $PACKAGE_NAME" >> $GITHUB_STEP_SUMMARY
 
             RESPONSE=$(curl -s -w "\n%{http_code}" -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
@@ -261,6 +277,7 @@ jobs:
               LATEST_VERSION="0.0.0"
             fi
 
+            # Strip pre-release for bump base
             LATEST_VERSION_BASE=$(printf "%s" "$LATEST_VERSION" | sed -E 's/-.*$//')
             if [ "$LATEST_VERSION_BASE" = "0.0.0" ] || [ -z "$LATEST_VERSION_BASE" ]; then
               BASE_VERSION=$(grep -oPm1 "(?<=<Version>)[^<]+" "$csproj" || echo "1.0.0")
@@ -278,27 +295,28 @@ jobs:
               *) echo "::error::Unknown bump '$BUMP'"; exit 1 ;;
             esac
 
-            echo "- Latest Published: \`$LATEST_VERSION\`" >> $GITHUB_STEP_SUMMARY
-            echo "- Base for bump: \`$BASE_VERSION\`" >> $GITHUB_STEP_SUMMARY
+            echo "- Latest Published (raw): \`$LATEST_VERSION\`" >> $GITHUB_STEP_SUMMARY
+            echo "- Latest (base for bump): \`$BASE_VERSION\`" >> $GITHUB_STEP_SUMMARY
             echo "- New Version (**$BUMP**): \`$NEW_VERSION\`" >> $GITHUB_STEP_SUMMARY
 
-            if grep -q "<Version>" "$csproj"; then
-              sed -i "s|<Version>.*</Version>|<Version>$NEW_VERSION</Version>|" "$csproj"
-            else
-              sed -i "0,/<PropertyGroup>/s|<PropertyGroup>|<PropertyGroup>\n    <Version>$NEW_VERSION</Version>|" "$csproj"
-            fi
-          done
+            # Expose outputs
+            echo "existing_latest_version=$BASE_VERSION" >> $GITHUB_OUTPUT
+            echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
 
-      - name: Verify version updates
-        if: steps.version.outputs.is_default_branch == 'true'
-        run: |
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "## Final Project Versions" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          for csproj in $(find . -name "*.csproj" -not -path "*/obj/*" -not -path "*/bin/*"); do
-            VERSION=$(grep -oPm1 "(?<=<Version>)[^<]+" "$csproj" || echo "NOT SET")
-            PACKAGE_ID=$(grep -oPm1 "(?<=<PackageId>)[^<]+" "$csproj" || basename "$csproj" .csproj)
-            echo "- **$PACKAGE_ID**: \`$VERSION\`" >> $GITHUB_STEP_SUMMARY
+            # Only write <Version> into csproj on default branch
+            if [ "$IS_DEFAULT_BRANCH" = "true" ]; then
+              if grep -q "<Version>" "$csproj"; then
+                sed -i "s|<Version>.*</Version>|<Version>$NEW_VERSION</Version>|" "$csproj"
+              else
+                sed -i "0,/<PropertyGroup>/s|<PropertyGroup>|<PropertyGroup>\n    <Version>$NEW_VERSION</Version>|" "$csproj"
+              fi
+              echo "- Action: Updated project version to $NEW_VERSION" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "- Action: Skipped editing csproj (non-default branch)" >> $GITHUB_STEP_SUMMARY
+            fi
+
+            echo "" >> $GITHUB_STEP_SUMMARY
+            break  # first (or only) csproj
           done
 
       - name: Restore
@@ -319,7 +337,6 @@ jobs:
             if [ "${{ steps.version.outputs.is_default_branch }}" = "true" ]; then
               dotnet pack "$csproj" --configuration ${{ env.BUILD_CONFIGURATION }} --output ./nupkgs --no-build
             else
-              # Will produce 1.0.0-pre-release-<DATE> if <Version> is not set in the csproj
               dotnet pack "$csproj" --configuration ${{ env.BUILD_CONFIGURATION }} --output ./nupkgs --no-build ${{ steps.version.outputs.build_version_suffix }}
             fi
           done
