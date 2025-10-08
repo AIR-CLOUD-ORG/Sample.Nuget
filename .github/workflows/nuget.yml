@@ -25,7 +25,7 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
       with:
-        fetch-depth: 0
+        fetch-depth: 1
     - name: Setup .NET
       uses: actions/setup-dotnet@v4
       with:
@@ -281,9 +281,108 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
-      security-events: write
+      packages: write
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
       with:
-        fetch-depth: 0
+        fetch-depth: 1
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: ${{ env.DOTNET_VERSION }}
+    - name: Determine version strategy
+      id: version
+      run: |
+        DATE=$(date +'%Y%m%d%H%M%S')
+        IS_DEFAULT_BRANCH=${{ github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main' }}
+        
+        echo "date=$DATE" >> $GITHUB_OUTPUT
+        echo "is_default_branch=$IS_DEFAULT_BRANCH" >> $GITHUB_OUTPUT
+        
+        if [ "$IS_DEFAULT_BRANCH" = "true" ]; then
+          echo "version_suffix=" >> $GITHUB_OUTPUT
+          echo "build_version_suffix=" >> $GITHUB_OUTPUT
+        else
+          echo "version_suffix=pre-release-$DATE" >> $GITHUB_OUTPUT
+          echo "build_version_suffix=--version-suffix pre-release-$DATE" >> $GITHUB_OUTPUT
+        fi
+    - name: Get latest package version from GitHub Packages
+      id: get_version
+      if: steps.version.outputs.is_default_branch == 'true'
+      run: |
+        # Get package names from csproj files
+        for csproj in $(find . -name "*.csproj" -not -path "*/obj/*" -not -path "*/bin/*"); do
+          PACKAGE_NAME=$(grep -oPm1 "(?<=<PackageId>)[^<]+" "$csproj" || basename "$csproj" .csproj)
+          
+          echo "Checking version for package: $PACKAGE_NAME"
+          
+          # Query GitHub Packages API for latest version
+          RESPONSE=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/orgs/${{ github.repository_owner }}/packages/nuget/$PACKAGE_NAME/versions" 2>/dev/null || echo "[]")
+          
+          # If organization endpoint fails, try user endpoint
+          if [ "$RESPONSE" = "[]" ] || [ -z "$RESPONSE" ]; then
+            RESPONSE=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              "https://api.github.com/users/${{ github.repository_owner }}/packages/nuget/$PACKAGE_NAME/versions" 2>/dev/null || echo "[]")
+          fi
+          
+          LATEST_VERSION=$(echo "$RESPONSE" | jq -r '.[0].name // "0.0.0"')
+          
+          echo "Latest version for $PACKAGE_NAME: $LATEST_VERSION"
+          
+          # Increment patch version
+          if [ "$LATEST_VERSION" != "0.0.0" ]; then
+            IFS='.' read -r MAJOR MINOR PATCH <<< "$LATEST_VERSION"
+            # Remove any pre-release suffix from PATCH
+            PATCH=$(echo "$PATCH" | grep -oP '^\d+')
+            NEW_VERSION="$MAJOR.$MINOR.$((PATCH + 1))"
+          else
+            # If no version found, check csproj for version or use 1.0.0
+            CSPROJ_VERSION=$(grep -oPm1 "(?<=<Version>)[^<]+" "$csproj" || echo "1.0.0")
+            NEW_VERSION=$CSPROJ_VERSION
+          fi
+          
+          echo "New version for $PACKAGE_NAME: $NEW_VERSION"
+          
+          # Update the csproj file with new version
+          if grep -q "<Version>" "$csproj"; then
+            sed -i "s|<Version>.*</Version>|<Version>$NEW_VERSION</Version>|" "$csproj"
+          else
+            # Add Version element after PropertyGroup opening tag
+            sed -i "0,/<PropertyGroup>/s|<PropertyGroup>|<PropertyGroup>\n    <Version>$NEW_VERSION</Version>|" "$csproj"
+          fi
+        done
+    
+    - name: Restore dependencies
+      run: dotnet restore
+    
+    - name: Build
+      run: dotnet build --configuration ${{ env.BUILD_CONFIGURATION }} --no-restore
+    
+    - name: Publish
+      run: dotnet publish **/*.csproj --configuration ${{ env.BUILD_CONFIGURATION }} --output ./publish --no-build
+    
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      if: success() || failure()
+      with:
+        name: published-app-${{ steps.version.outputs.date }}
+        path: ./publish
+    
+    - name: Pack NuGet packages
+      run: |
+        if [ "${{ steps.version.outputs.is_default_branch }}" = "true" ]; then
+          dotnet pack **/*.csproj --configuration ${{ env.BUILD_CONFIGURATION }} --output ./nupkgs --no-build
+        else
+          dotnet pack **/*.csproj --configuration ${{ env.BUILD_CONFIGURATION }} --output ./nupkgs --no-build ${{ steps.version.outputs.build_version_suffix }}
+        fi
+    
+    - name: List generated packages
+      run: ls -la ./nupkgs/
+    
+    - name: Push to GitHub Packages
+      run: |
+        dotnet nuget add source --username ${{ github.actor }} --password ${{ secrets.GITHUB_TOKEN }} --store-password-in-clear-text --name github "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json"
+        dotnet nuget push "./nupkgs/*.nupkg" --api-key ${{ secrets.GITHUB_TOKEN }} --source "github" --skip-duplicate
+      continue-on-error: ${{ steps.version.outputs.is_default_branch == 'false' }}  
