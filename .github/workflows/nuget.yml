@@ -216,10 +216,10 @@ jobs:
         name: lint-validation-packages
         path: ./lint-nupkgs/
     - name: Comment PR with results
-      if: always()
+      if: github.event_name == 'pull_request'
       uses: actions/github-script@v7
       with:
-        github-token: ${{ secrets.NUGET_PUBLISH_TOKEN }}
+        github-token: ${{ secrets.GITHUB_TOKEN }}  # Use GITHUB_TOKEN instead
         script: |
           const fs = require('fs');
           
