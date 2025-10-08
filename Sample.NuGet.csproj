@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <!-- You can use net9.0 if that’s your standard -->
+    <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
+
+    <!-- Package metadata -->
+    <PackageId>Sample.NuGet.Demo</PackageId>
+    <!-- <Version>1.0.0</Version>
+    <Authors>Abheetha</Authors>-->
+    <Company>Demo Co</Company>
+    <Product>Sample.NuGet.Demo</Product>
+    <Description>A tiny demo NuGet package that returns a greeting string.</Description>
+    <PackageTags>demo;sample;nuget</PackageTags>
+    <RepositoryUrl>https://github.com/your-org/your-repo</RepositoryUrl>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageIcon>icon.png</PackageIcon>
+
+    <!-- Make symbols & source handy (optional but nice) -->
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
+    <None Include="icon.png" Pack="true" PackagePath="\" />
+  </ItemGroup>
+</Project>
