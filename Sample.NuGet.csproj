@@ -6,8 +6,8 @@
 
     <!-- Package metadata -->
     <PackageId>Sample.NuGet.Demo</PackageId>
-    <Version>1.0.0</Version>
-    <Authors>Abheetha</Authors>
+    <!-- <Version>1.0.0</Version>
+    <Authors>Abheetha</Authors>-->
     <Company>Demo Co</Company>
     <Product>Sample.NuGet.Demo</Product>
     <Description>A tiny demo NuGet package that returns a greeting string.</Description>
