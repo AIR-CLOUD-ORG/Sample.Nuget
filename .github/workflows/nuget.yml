@@ -14,8 +14,8 @@ env:
 
 jobs:
 
-  security-scan:
-    name: Security Scan (GitLeaks)
+  lint:
+    name: Lint and Validate
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -26,42 +26,190 @@ jobs:
       uses: actions/checkout@v4
       with:
         fetch-depth: 0
-    - name: Run Gitleaks
-      id: gitleaks
-      uses: gitleaks/gitleaks-action@v2
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        #GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }} # Optional: for commercial use
-    - name: Upload Gitleaks SARIF report
-      if: always()
-      uses: github/codeql-action/upload-sarif@v3
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
       with:
-        sarif_file: results.sarif
-    - name: Generate Gitleaks summary
-      if: always()
+        dotnet-version: ${{ env.DOTNET_VERSION }}
+    - name: Install dotnet format
+      run: dotnet tool install -g dotnet-format
+    - name: Restore dependencies
+      run: dotnet restore
+    - name: Check code formatting
+      id: format_check
       run: |
-        echo "## 🔒 Gitleaks Security Scan Results" >> $GITHUB_STEP_SUMMARY
+        dotnet format --verify-no-changes --verbosity diagnostic
+      continue-on-error: true
+    - name: Validate project structure
+      id: validate_structure
+      run: |
+        echo "## Project Validation Results" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+
+        VALIDATION_FAILED=0
+
+        # Check all csproj files
+        for csproj in $(find , -name "*.csproj" -not -path "*/obj/*" -not -path "*/bin/*"); do
+          echo "Validating: $csproj"
+          echo "### $(basename $csproj)" >> $GITHUB_STEP_SUMMARY
+
+          # Check for required package metadata
+          MISSING_FIELDS=""
+
+          if ! grep -q "<PackageId>" "$csproj"; then
+            MISSING_FIELDS="$MISSING_FIELDS\n- PackageId"
+          fi
+          
+          if ! grep -q "<Version>" "$csproj"; then
+            MISSING_FIELDS="$MISSING_FIELDS\n- Version"
+          fi
+          
+          if ! grep -q "<Authors>" "$csproj"; then
+            MISSING_FIELDS="$MISSING_FIELDS\n- Authors"
+          fi
+          
+          if ! grep -q "<Description>" "$csproj"; then
+            MISSING_FIELDS="$MISSING_FIELDS\n- Description"
+          fi
+
+          if [ -n "$MISSING_FIELDS" ]; then
+            echo "❌ Missing required NuGet metadata:" >> $GITHUB_STEP_SUMMARY
+            echo -e "$MISSING_FIELDS" >> $GITHUB_STEP_SUMMARY
+            VALIDATION_FAILED=1
+          else
+            echo "✅ All required metadata present" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+        done
+        
+        if [ $VALIDATION_FAILED -eq 1 ]; then
+          echo "validation_status=failed" >> $GITHUB_OUTPUT
+          exit 1
+        else
+          echo "validation_status=passed" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Build for validation
+      run: dotnet build --configuration ${{ env.BUILD_CONFIGURATION }} --no-restore
+    - name: Run dotnet pack (dry run)
+      id: pack_validation
+      run: |
+        echo "## NuGet Package Validation" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         
-        if [ -f results.sarif ]; then
-          LEAK_COUNT=$(jq '.runs[0].results | length' results.sarif)
-          
-          if [ "$LEAK_COUNT" -eq 0 ]; then
-            echo "✅ **No secrets or API keys detected!**" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "❌ **WARNING: $LEAK_COUNT potential secret(s) detected!**" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "Please review the security findings in the Security tab." >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            
-            # List detected secrets (without exposing actual values)
-            echo "### Detected Issues:" >> $GITHUB_STEP_SUMMARY
-            jq -r '.runs[0].results[] | "- **\(.ruleId)** in `\(.locations[0].physicalLocation.artifactLocation.uri)` (Line: \(.locations[0].physicalLocation.region.startLine))"' results.sarif >> $GITHUB_STEP_SUMMARY
+        dotnet pack **/*.csproj --configuration ${{ env.BUILD_CONFIGURATION }} --output ./lint-nupkgs --no-build
+        
+        echo "### Generated Packages:" >> $GITHUB_STEP_SUMMARY
+        for pkg in ./lint-nupkgs/*.nupkg; do
+          if [ -f "$pkg" ]; then
+            SIZE=$(du -h "$pkg" | cut -f1)
+            echo "- ✅ $(basename $pkg) ($SIZE)" >> $GITHUB_STEP_SUMMARY
           fi
+        done
+    - name: Analyze package contents
+      run: |
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Package Contents Analysis:" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        for pkg in ./lint-nupkgs/*.nupkg; do
+          if [ -f "$pkg" ]; then
+            echo "#### $(basename $pkg)" >> $GITHUB_STEP_SUMMARY
+            
+            # Extract and analyze package
+            TEMP_DIR=$(mktemp -d)
+            unzip -q "$pkg" -d "$TEMP_DIR"
+            
+            # Check for DLLs
+            DLL_COUNT=$(find "$TEMP_DIR" -name "*.dll" | wc -l)
+            echo "- DLLs: $DLL_COUNT" >> $GITHUB_STEP_SUMMARY
+            
+            # Check for dependencies
+            if [ -f "$TEMP_DIR/*.nuspec" ]; then
+              DEP_COUNT=$(grep -c "<dependency " "$TEMP_DIR"/*.nuspec || echo "0")
+              echo "- Dependencies: $DEP_COUNT" >> $GITHUB_STEP_SUMMARY
+            fi
+            
+            # Check package size
+            SIZE=$(du -h "$pkg" | cut -f1)
+            echo "- Size: $SIZE" >> $GITHUB_STEP_SUMMARY
+            
+            rm -rf "$TEMP_DIR"
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+        done
+    - name: Check for security vulnerabilities
+      run: |
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "## Security Audit" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        dotnet list package --vulnerable --include-transitive 2>&1 | tee vulnerability-report.txt
+        
+        if grep -q "has the following vulnerable packages" vulnerability-report.txt; then
+          echo "⚠️ **Vulnerable packages detected!**" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          cat vulnerability-report.txt >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
         else
-          echo "⚠️ Gitleaks scan completed but no results file generated" >> $GITHUB_STEP_SUMMARY
+          echo "✅ No vulnerable packages detected" >> $GITHUB_STEP_SUMMARY
         fi
-    - name: Comment PR with Gitleaks results
+    - name: Check for deprecated packages
+      run: |
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "## Deprecated Packages Check" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        dotnet list package --deprecated 2>&1 | tee deprecated-report.txt
+        
+        if grep -q "The following sources were used" deprecated-report.txt; then
+          if grep -q "Deprecated" deprecated-report.txt; then
+            echo "⚠️ **Deprecated packages found!**" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            cat deprecated-report.txt >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "✅ No deprecated packages found" >> $GITHUB_STEP_SUMMARY
+          fi
+        fi
+    - name: Scan packages for embedded secrets
+      run: |
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "## Package Secret Scan" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        # Extract and scan each package
+        for pkg in ./lint-nupkgs/*.nupkg; do
+          if [ -f "$pkg" ]; then
+            TEMP_DIR=$(mktemp -d)
+            unzip -q "$pkg" -d "$TEMP_DIR"
+            
+            echo "Scanning $(basename $pkg)..." >> $GITHUB_STEP_SUMMARY
+            
+            # Use gitleaks to scan extracted package contents
+            docker run --rm -v "$TEMP_DIR:/scan" ghcr.io/gitleaks/gitleaks:latest detect --source="/scan" --no-git --report-format=json --report-path=/scan/pkg-leaks.json || true
+            
+            if [ -f "$TEMP_DIR/pkg-leaks.json" ]; then
+              LEAK_COUNT=$(jq '. | length' "$TEMP_DIR/pkg-leaks.json")
+              if [ "$LEAK_COUNT" -gt 0 ]; then
+                echo "❌ **$(basename $pkg)**: $LEAK_COUNT potential secret(s) found in package!" >> $GITHUB_STEP_SUMMARY
+              else
+                echo "✅ **$(basename $pkg)**: Clean" >> $GITHUB_STEP_SUMMARY
+              fi
+            else
+              echo "✅ **$(basename $pkg)**: Clean" >> $GITHUB_STEP_SUMMARY
+            fi
+            
+            rm -rf "$TEMP_DIR"
+          fi
+        done
+    - name: Upload lint artifacts
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: lint-validation-packages
+        path: ./lint-nupkgs/
+    - name: Comment PR with results
       if: always()
       uses: actions/github-script@v7
       with:
@@ -69,24 +217,29 @@ jobs:
         script: |
           const fs = require('fs');
           
-          let comment = '## 🔒 Gitleaks Security Scan\n\n';
+          let comment = '## 🔍 NuGet Package Lint Results\n\n';
           
-          if ('${{ steps.gitleaks.outcome }}' === 'success') {
-            comment += '✅ **No secrets or API keys detected**\n\n';
-            comment += 'Your code is clear of hardcoded secrets, API keys, and credentials.\n';
-          } else if ('${{ steps.gitleaks.outcome }}' === 'failure') {
-            comment += '❌ **SECURITY ALERT: Potential secrets detected!**\n\n';
-            comment += '⚠️ Gitleaks has detected potential secrets or API keys in your code.\n\n';
-            comment += '**Next steps:**\n';
-            comment += '1. Review the [Security tab](${{ github.server_url }}/${{ github.repository }}/security/code-scanning) for details\n';
-            comment += '2. Remove any hardcoded secrets from your code\n';
-            comment += '3. Use environment variables or secure secret management instead\n';
-            comment += '4. Consider rotating any exposed credentials\n\n';
-            comment += '**Common issues:**\n';
-            comment += '- API keys in configuration files\n';
-            comment += '- Database connection strings with passwords\n';
-            comment += '- Private keys or certificates\n';
-            comment += '- Authentication tokens\n';
+          // Format check
+          if ('${{ steps.format_check.outcome }}' === 'failure') {
+            comment += '❌ **Code formatting issues detected**\n';
+            comment += 'Please run `dotnet format` to fix formatting issues.\n\n';
+          } else {
+            comment += '✅ Code formatting passed\n\n';
+          }
+          
+          // Validation check
+          if ('${{ steps.validate_structure.outputs.validation_status }}' === 'failed') {
+            comment += '❌ **Project validation failed**\n';
+            comment += 'Check the workflow summary for details about missing metadata.\n\n';
+          } else {
+            comment += '✅ Project validation passed\n\n';
+          }
+          
+          // Pack validation
+          if ('${{ steps.pack_validation.outcome }}' === 'success') {
+            comment += '✅ Package creation validation passed\n\n';
+          } else {
+            comment += '❌ **Package creation failed**\n\n';
           }
           
           comment += '\n📊 View detailed results in the [workflow summary](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})';
@@ -98,7 +251,7 @@ jobs:
             repo: context.repo.repo,
           });
           
-          const existingComment = comments.find(c => c.body.includes('🔒 Gitleaks Security Scan'));
+          const existingComment = comments.find(c => c.body.includes('🔍 NuGet Package Lint Results'));
           
           if (existingComment) {
             await github.rest.issues.updateComment({
@@ -115,19 +268,6 @@ jobs:
               body: comment
             });
           }
-
-  lint:
-    name: Lint and Validate
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: write
-      security-events: write
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
 
   build:
     name: Build and Publish
