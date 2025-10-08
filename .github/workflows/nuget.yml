@@ -287,55 +287,83 @@ jobs:
       uses: actions/checkout@v4
       with:
         fetch-depth: 1
+    
     - name: Setup .NET
       uses: actions/setup-dotnet@v4
       with:
         dotnet-version: ${{ env.DOTNET_VERSION }}
+    
     - name: Determine version strategy
       id: version
       run: |
         DATE=$(date +'%Y%m%d%H%M%S')
-        IS_DEFAULT_BRANCH=${{ github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main' }}
+        
+        if [[ "${{ github.ref }}" == "refs/heads/master" ]] || [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+          IS_DEFAULT_BRANCH="true"
+          echo "version_suffix=" >> $GITHUB_OUTPUT
+          echo "build_version_suffix=" >> $GITHUB_OUTPUT
+        else
+          IS_DEFAULT_BRANCH="false"
+          echo "version_suffix=pre-release-$DATE" >> $GITHUB_OUTPUT
+          echo "build_version_suffix=--version-suffix pre-release-$DATE" >> $GITHUB_OUTPUT
+        fi
         
         echo "date=$DATE" >> $GITHUB_OUTPUT
         echo "is_default_branch=$IS_DEFAULT_BRANCH" >> $GITHUB_OUTPUT
         
-        if [ "$IS_DEFAULT_BRANCH" = "true" ]; then
-          echo "version_suffix=" >> $GITHUB_OUTPUT
-          echo "build_version_suffix=" >> $GITHUB_OUTPUT
-        else
-          echo "version_suffix=pre-release-$DATE" >> $GITHUB_OUTPUT
-          echo "build_version_suffix=--version-suffix pre-release-$DATE" >> $GITHUB_OUTPUT
-        fi
+        echo "Branch: ${{ github.ref }}"
+        echo "Is default branch: $IS_DEFAULT_BRANCH"
+    
     - name: Get latest package version from GitHub Packages
       id: get_version
       if: steps.version.outputs.is_default_branch == 'true'
       run: |
+        echo "## Version Increment Process" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
         # Get package names from csproj files
         for csproj in $(find . -name "*.csproj" -not -path "*/obj/*" -not -path "*/bin/*"); do
           PACKAGE_NAME=$(grep -oPm1 "(?<=<PackageId>)[^<]+" "$csproj" || basename "$csproj" .csproj)
           
+          echo "### Processing: $PACKAGE_NAME" >> $GITHUB_STEP_SUMMARY
           echo "Checking version for package: $PACKAGE_NAME"
           
-          # Query GitHub Packages API for latest version
-          RESPONSE=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            "https://api.github.com/orgs/${{ github.repository_owner }}/packages/nuget/$PACKAGE_NAME/versions" 2>/dev/null || echo "[]")
+          # Try organization endpoint first
+          RESPONSE=$(curl -s -w "\n%{http_code}" -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/orgs/${{ github.repository_owner }}/packages/nuget/$PACKAGE_NAME/versions")
           
-          # If organization endpoint fails, try user endpoint
-          if [ "$RESPONSE" = "[]" ] || [ -z "$RESPONSE" ]; then
-            RESPONSE=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-              "https://api.github.com/users/${{ github.repository_owner }}/packages/nuget/$PACKAGE_NAME/versions" 2>/dev/null || echo "[]")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | head -n-1)
+          
+          # If organization endpoint fails (404), try user endpoint
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "Organization endpoint returned HTTP $HTTP_CODE, trying user endpoint..."
+            RESPONSE=$(curl -s -w "\n%{http_code}" -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/users/${{ github.repository_owner }}/packages/nuget/$PACKAGE_NAME/versions")
+            
+            HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+            BODY=$(echo "$RESPONSE" | head -n-1)
           fi
           
-          LATEST_VERSION=$(echo "$RESPONSE" | jq -r '.[0].name // "0.0.0"')
+          if [ "$HTTP_CODE" = "200" ]; then
+            LATEST_VERSION=$(echo "$BODY" | jq -r 'first(.[] | select(.metadata.package_type == "nuget")) | .name // "0.0.0"')
+            echo "- API Status: ✅ Success (HTTP $HTTP_CODE)" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "Could not fetch versions from GitHub Packages (HTTP $HTTP_CODE)"
+            echo "- API Status: ⚠️ Failed (HTTP $HTTP_CODE)" >> $GITHUB_STEP_SUMMARY
+            LATEST_VERSION="0.0.0"
+          fi
           
           echo "Latest version for $PACKAGE_NAME: $LATEST_VERSION"
+          echo "- Latest Published Version: \`$LATEST_VERSION\`" >> $GITHUB_STEP_SUMMARY
           
           # Increment patch version
           if [ "$LATEST_VERSION" != "0.0.0" ]; then
             IFS='.' read -r MAJOR MINOR PATCH <<< "$LATEST_VERSION"
             # Remove any pre-release suffix from PATCH
-            PATCH=$(echo "$PATCH" | grep -oP '^\d+')
+            PATCH=$(echo "$PATCH" | grep -oP '^\d+' || echo "0")
             NEW_VERSION="$MAJOR.$MINOR.$((PATCH + 1))"
           else
             # If no version found, check csproj for version or use 1.0.0
@@ -344,14 +372,34 @@ jobs:
           fi
           
           echo "New version for $PACKAGE_NAME: $NEW_VERSION"
+          echo "- New Version: \`$NEW_VERSION\`" >> $GITHUB_STEP_SUMMARY
           
           # Update the csproj file with new version
           if grep -q "<Version>" "$csproj"; then
             sed -i "s|<Version>.*</Version>|<Version>$NEW_VERSION</Version>|" "$csproj"
+            echo "- Action: Updated existing version tag" >> $GITHUB_STEP_SUMMARY
           else
             # Add Version element after PropertyGroup opening tag
             sed -i "0,/<PropertyGroup>/s|<PropertyGroup>|<PropertyGroup>\n    <Version>$NEW_VERSION</Version>|" "$csproj"
+            echo "- Action: Added new version tag" >> $GITHUB_STEP_SUMMARY
           fi
+          
+          echo "Updated $csproj to version $NEW_VERSION"
+          echo "" >> $GITHUB_STEP_SUMMARY
+        done
+    
+    - name: Verify version updates
+      if: steps.version.outputs.is_default_branch == 'true'
+      run: |
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "## Final Project Versions" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        for csproj in $(find . -name "*.csproj" -not -path "*/obj/*" -not -path "*/bin/*"); do
+          VERSION=$(grep -oPm1 "(?<=<Version>)[^<]+" "$csproj" || echo "NOT SET")
+          PACKAGE_ID=$(grep -oPm1 "(?<=<PackageId>)[^<]+" "$csproj" || basename "$csproj" .csproj)
+          echo "- **$PACKAGE_ID**: \`$VERSION\`" >> $GITHUB_STEP_SUMMARY
+          echo "Project: $PACKAGE_ID - Version: $VERSION"
         done
     
     - name: Restore dependencies
@@ -381,6 +429,10 @@ jobs:
       run: |
         mkdir -p ./nupkgs
         
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "## NuGet Package Creation" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
         # Find and pack each csproj file
         for csproj in $(find . -name "*.csproj" -not -path "*/obj/*" -not -path "*/bin/*"); do
           echo "Packing: $csproj"
@@ -391,12 +443,39 @@ jobs:
             dotnet pack "$csproj" --configuration ${{ env.BUILD_CONFIGURATION }} --output ./nupkgs --no-build ${{ steps.version.outputs.build_version_suffix }}
           fi
         done
+        
+        # List created packages
+        for pkg in ./nupkgs/*.nupkg; do
+          if [ -f "$pkg" ]; then
+            SIZE=$(du -h "$pkg" | cut -f1)
+            echo "- ✅ \`$(basename $pkg)\` ($SIZE)" >> $GITHUB_STEP_SUMMARY
+          fi
+        done
     
     - name: List generated packages
       run: ls -la ./nupkgs/
     
     - name: Push to GitHub Packages
       run: |
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "## Package Publishing Results" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
         dotnet nuget add source --username ${{ github.actor }} --password ${{ secrets.GITHUB_TOKEN }} --store-password-in-clear-text --name github "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json"
-        dotnet nuget push "./nupkgs/*.nupkg" --api-key ${{ secrets.GITHUB_TOKEN }} --source "github" --skip-duplicate
-      continue-on-error: ${{ steps.version.outputs.is_default_branch == 'false' }}  
+        
+        # Push each package individually to capture results
+        for pkg in ./nupkgs/*.nupkg; do
+          if [ -f "$pkg" ]; then
+            echo "Pushing $(basename $pkg)..."
+            if dotnet nuget push "$pkg" --api-key ${{ secrets.GITHUB_TOKEN }} --source "github" --skip-duplicate 2>&1 | tee push-output.txt; then
+              if grep -q "already exists" push-output.txt || grep -q "already been pushed" push-output.txt; then
+                echo "- ⚠️ \`$(basename $pkg)\`: Already exists (skipped)" >> $GITHUB_STEP_SUMMARY
+              else
+                echo "- ✅ \`$(basename $pkg)\`: Published successfully" >> $GITHUB_STEP_SUMMARY
+              fi
+            else
+              echo "- ❌ \`$(basename $pkg)\`: Push failed" >> $GITHUB_STEP_SUMMARY
+            fi
+          fi
+        done
+      continue-on-error: ${{ steps.version.outputs.is_default_branch == 'false' }}
