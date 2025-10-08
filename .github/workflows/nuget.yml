@@ -361,7 +361,14 @@ jobs:
       run: dotnet build --configuration ${{ env.BUILD_CONFIGURATION }} --no-restore
     
     - name: Publish
-      run: dotnet publish **/*.csproj --configuration ${{ env.BUILD_CONFIGURATION }} --output ./publish --no-build
+      run: |
+        mkdir -p ./publish
+        
+        # Find and publish each csproj file
+        for csproj in $(find . -name "*.csproj" -not -path "*/obj/*" -not -path "*/bin/*"); do
+          echo "Publishing: $csproj"
+          dotnet publish "$csproj" --configuration ${{ env.BUILD_CONFIGURATION }} --output ./publish --no-build
+        done
     
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
@@ -372,11 +379,18 @@ jobs:
     
     - name: Pack NuGet packages
       run: |
-        if [ "${{ steps.version.outputs.is_default_branch }}" = "true" ]; then
-          dotnet pack **/*.csproj --configuration ${{ env.BUILD_CONFIGURATION }} --output ./nupkgs --no-build
-        else
-          dotnet pack **/*.csproj --configuration ${{ env.BUILD_CONFIGURATION }} --output ./nupkgs --no-build ${{ steps.version.outputs.build_version_suffix }}
-        fi
+        mkdir -p ./nupkgs
+        
+        # Find and pack each csproj file
+        for csproj in $(find . -name "*.csproj" -not -path "*/obj/*" -not -path "*/bin/*"); do
+          echo "Packing: $csproj"
+          
+          if [ "${{ steps.version.outputs.is_default_branch }}" = "true" ]; then
+            dotnet pack "$csproj" --configuration ${{ env.BUILD_CONFIGURATION }} --output ./nupkgs --no-build
+          else
+            dotnet pack "$csproj" --configuration ${{ env.BUILD_CONFIGURATION }} --output ./nupkgs --no-build ${{ steps.version.outputs.build_version_suffix }}
+          fi
+        done
     
     - name: List generated packages
       run: ls -la ./nupkgs/
