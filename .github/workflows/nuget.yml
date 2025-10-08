@@ -219,7 +219,7 @@ jobs:
       if: always()
       uses: actions/github-script@v7
       with:
-        github-token: ${{ secrets.GITHUB_TOKEN }}
+        github-token: ${{ secrets.NUGET_PUBLISH_TOKEN }}
         script: |
           const fs = require('fs');
           
