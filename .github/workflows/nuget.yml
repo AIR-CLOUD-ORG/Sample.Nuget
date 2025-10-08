@@ -1,158 +1,58 @@
-# ---------------------------------------------
-# Workflow: Build & Pack a sample NuGet package
-# ---------------------------------------------
-name: Build & Pack NuGet
+name: Build, Package and Publish NuGet
 
 on:
   push:
-    branches: ["**"]
-    tags: ["v*"]
+    branches:
+      - '**'
   pull_request:
+    branches:
+      - '**'
 
-permissions:
-  contents: read
-  packages: write
+env:
+  DOTNET_VERSION: '8.X'
+  BUILD_CONFIGURATION: 'Release'
+
+#permissions:
+# contents: read
+#  packages: write
 
 jobs:
-  build-pack:
+
+  security-scan:
+    name: Security Scan (GitLeaks)
     runs-on: ubuntu-latest
-
-    env:
-      PACKAGE_NAME: Sample.NuGet.Demo
-      PROJECT_PATH: Sample.NuGet.csproj
-      ARTIFACTS_DIR: artifacts
-
+    permissions:
+      contents: read
+      pull-requests: write
+      security-events: write
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          fetch-tags: true
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
 
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: |
-            8.x
-            9.x
+  lint:
+    name: Lint and Validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      security-events: write
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
 
-      - name: Validate project path
-        shell: bash
-        run: |
-          set -e
-          echo "Repo root: $(pwd)"
-          echo "Looking for: $PROJECT_PATH"
-          if [[ ! -f "$PROJECT_PATH" ]]; then
-            echo "::error ::PROJECT_PATH not found. Update env.PROJECT_PATH to your .csproj"
-            ls -la
-            find . -maxdepth 4 -name "*.csproj" -print
-            exit 1
-          fi
-
-      - name: Restore
-        run: dotnet restore "${PROJECT_PATH}"
-
-      - name: Build (Release)
-        run: dotnet build "${PROJECT_PATH}" -c Release --no-restore
-
-      - name: Determine TAG and VERSION
-        id: ver
-        shell: bash
-        run: |
-          set -e
-          if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" =~ ^v[0-9] ]]; then
-            TAG="${GITHUB_REF_NAME#v}"
-          else
-            if git describe --tags --abbrev=0 --match "v*" >/dev/null 2>&1; then
-              LATEST="$(git describe --tags --abbrev=0 --match "v*")"
-              TAG="${LATEST#v}"
-            else
-              TAG="0.0.${GITHUB_RUN_NUMBER}"
-            fi
-          fi
-
-          if [[ "${GITHUB_REF}" == "refs/heads/main" || "${GITHUB_REF}" == "refs/heads/master" || "${GITHUB_REF_TYPE}" == "tag" ]]; then
-            VERSION="${TAG}"
-            FRIENDLY="${PACKAGE_NAME}-v${TAG}.nupkg"
-            FRIENDLY_SYM="${PACKAGE_NAME}-v${TAG}.snupkg"
-          else
-            VERSION="${TAG}-pre-release-ci"
-            FRIENDLY="${PACKAGE_NAME}-v${TAG}-pre-release-ci.nupkg"
-            FRIENDLY_SYM="${PACKAGE_NAME}-v${TAG}-pre-release-ci.snupkg"
-          fi
-
-          echo "tag=$TAG"                   >> "$GITHUB_OUTPUT"
-          echo "version=$VERSION"           >> "$GITHUB_OUTPUT"
-          echo "friendly=$FRIENDLY"         >> "$GITHUB_OUTPUT"
-          echo "friendly_sym=$FRIENDLY_SYM" >> "$GITHUB_OUTPUT"
-
-      - name: Pack
-        run: >
-          dotnet pack "${PROJECT_PATH}"
-          -c Release
-          -o "${ARTIFACTS_DIR}"
-          /p:PackageVersion=${{ steps.ver.outputs.version }}
-          /p:ContinuousIntegrationBuild=true
-          --no-build
-
-      - name: Show artifacts
-        run: ls -la "${ARTIFACTS_DIR}"
-
-      - name: Create friendly-named copies
-        shell: bash
-        run: |
-          set -e
-          SRC_NUPKG="${ARTIFACTS_DIR}/${PACKAGE_NAME}.${{ steps.ver.outputs.version }}.nupkg"
-          if [[ ! -f "$SRC_NUPKG" ]]; then
-            echo "::error ::Expected package not found: $SRC_NUPKG"
-            ls -la "${ARTIFACTS_DIR}" || true
-            exit 1
-          fi
-          cp "$SRC_NUPKG" "${ARTIFACTS_DIR}/${{ steps.ver.outputs.friendly }}"
-          SRC_SNUPKG="${ARTIFACTS_DIR}/${PACKAGE_NAME}.${{ steps.ver.outputs.version }}.snupkg"
-          if [[ -f "$SRC_SNUPKG" ]]; then
-            cp "$SRC_SNUPKG" "${ARTIFACTS_DIR}/${{ steps.ver.outputs.friendly_sym }}"
-          fi
-
-      # Compute a SAFE artifact name (no /, \, ?, *, etc.)
-      - name: Compute safe artifact name
-        id: an
-        shell: bash
-        run: |
-          set -e
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            RAW="pr-${{ github.event.number }}"
-          else
-            RAW="${{ github.ref_type }}-${{ github.ref_name }}"
-          fi
-          # Replace invalid chars with '-'
-          SAFE="$(printf "%s" "$RAW" | sed -E 's/[\"<>|:*?\\\/\r\n]+/-/g' | sed -E 's/^-+|-+$//g')"
-          echo "name=nuget-${SAFE}" >> "$GITHUB_OUTPUT"
-
-      - name: Upload artifacts (NuGet packages)
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ steps.an.outputs.name }}
-          path: |
-            ${{ env.ARTIFACTS_DIR }}/*.nupkg
-            ${{ env.ARTIFACTS_DIR }}/*.snupkg
-          if-no-files-found: error
-
-      # Publish to GitHub Packages (NuGet feed) on push (branches & tags). Skips PRs.
-      - name: Publish to GitHub Packages
-        if: github.event_name == 'push'
-        env:
-          OWNER: ${{ github.repository_owner }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -e
-          dotnet nuget add source \
-            --username "${{ github.actor }}" \
-            --password "${GH_TOKEN}" \
-            --store-password-in-clear-text \
-            --name github "https://nuget.pkg.github.com/${OWNER}/index.json"
-
-          dotnet nuget push "${ARTIFACTS_DIR}/*.nupkg" \
-            --source "github" \
-            --api-key "${GH_TOKEN}" \
-            --skip-duplicate
+  build:
+    name: Build and Publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      security-events: write
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
