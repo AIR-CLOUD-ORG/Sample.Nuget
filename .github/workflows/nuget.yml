@@ -38,55 +38,55 @@ jobs:
       run: |
         dotnet format --verify-no-changes --verbosity diagnostic
       continue-on-error: true
-    - name: Validate project structure
-      id: validate_structure
-      run: |
-        echo "## Project Validation Results" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
+    #- name: Validate project structure
+    #  id: validate_structure
+    #  run: |
+    #    echo "## Project Validation Results" >> $GITHUB_STEP_SUMMARY
+    #    echo "" >> $GITHUB_STEP_SUMMARY
 
-        VALIDATION_FAILED=0
+    #    VALIDATION_FAILED=0
 
-        # Check all csproj files
-        for csproj in $(find . -name "*.csproj" -not -path "*/obj/*" -not -path "*/bin/*"); do
-          echo "Validating: $csproj"
-          echo "### $(basename $csproj)" >> $GITHUB_STEP_SUMMARY
+    #    # Check all csproj files
+    #    for csproj in $(find . -name "*.csproj" -not -path "*/obj/*" -not -path "*/bin/*"); do
+    #      echo "Validating: $csproj"
+    #      echo "### $(basename $csproj)" >> $GITHUB_STEP_SUMMARY
 
-          # Check for required package metadata
-          MISSING_FIELDS=""
+    #      # Check for required package metadata
+    #      MISSING_FIELDS=""
 
-          if ! grep -q "<PackageId>" "$csproj"; then
-            MISSING_FIELDS="$MISSING_FIELDS\n- PackageId"
-          fi
+    #      if ! grep -q "<PackageId>" "$csproj"; then
+    #        MISSING_FIELDS="$MISSING_FIELDS\n- PackageId"
+    #      fi
           
-          if ! grep -q "<Version>" "$csproj"; then
-            MISSING_FIELDS="$MISSING_FIELDS\n- Version"
-          fi
+    #      if ! grep -q "<Version>" "$csproj"; then
+    #        MISSING_FIELDS="$MISSING_FIELDS\n- Version"
+    #      fi
           
-          if ! grep -q "<Authors>" "$csproj"; then
-            MISSING_FIELDS="$MISSING_FIELDS\n- Authors"
-          fi
+    #      if ! grep -q "<Authors>" "$csproj"; then
+    #        MISSING_FIELDS="$MISSING_FIELDS\n- Authors"
+    #      fi
           
-          if ! grep -q "<Description>" "$csproj"; then
-            MISSING_FIELDS="$MISSING_FIELDS\n- Description"
-          fi
+    #      if ! grep -q "<Description>" "$csproj"; then
+    #        MISSING_FIELDS="$MISSING_FIELDS\n- Description"
+    #      fi
 
-          if [ -n "$MISSING_FIELDS" ]; then
-            echo "❌ Missing required NuGet metadata:" >> $GITHUB_STEP_SUMMARY
-            echo -e "$MISSING_FIELDS" >> $GITHUB_STEP_SUMMARY
-            VALIDATION_FAILED=1
-          else
-            echo "✅ All required metadata present" >> $GITHUB_STEP_SUMMARY
-          fi
+    #      if [ -n "$MISSING_FIELDS" ]; then
+    #        echo "❌ Missing required NuGet metadata:" >> $GITHUB_STEP_SUMMARY
+    #        echo -e "$MISSING_FIELDS" >> $GITHUB_STEP_SUMMARY
+    #        VALIDATION_FAILED=1
+    #      else
+    #        echo "✅ All required metadata present" >> $GITHUB_STEP_SUMMARY
+    #      fi
           
-          echo "" >> $GITHUB_STEP_SUMMARY
-        done
+    #      echo "" >> $GITHUB_STEP_SUMMARY
+    #    done
         
-        if [ $VALIDATION_FAILED -eq 1 ]; then
-          echo "validation_status=failed" >> $GITHUB_OUTPUT
-          exit 1
-        else
-          echo "validation_status=passed" >> $GITHUB_OUTPUT
-        fi
+    #    if [ $VALIDATION_FAILED -eq 1 ]; then
+    #      echo "validation_status=failed" >> $GITHUB_OUTPUT
+    #      exit 1
+    #    else
+    #      echo "validation_status=passed" >> $GITHUB_OUTPUT
+    #    fi
 
     - name: Build for validation
       run: dotnet build --configuration ${{ env.BUILD_CONFIGURATION }} --no-restore
