@@ -97,7 +97,13 @@ jobs:
         echo "## NuGet Package Validation" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         
-        dotnet pack **/*.csproj --configuration ${{ env.BUILD_CONFIGURATION }} --output ./lint-nupkgs --no-build
+        mkdir -p ./lint-nupkgs
+        
+        # Find and pack each csproj file
+        for csproj in $(find . -name "*.csproj" -not -path "*/obj/*" -not -path "*/bin/*"); do
+          echo "Packing: $csproj"
+          dotnet pack "$csproj" --configuration ${{ env.BUILD_CONFIGURATION }} --output ./lint-nupkgs --no-build
+        done
         
         echo "### Generated Packages:" >> $GITHUB_STEP_SUMMARY
         for pkg in ./lint-nupkgs/*.nupkg; do
