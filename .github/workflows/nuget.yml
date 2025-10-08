@@ -7,7 +7,6 @@ on:
   pull_request:
     branches:
       - '**'
-
 env:
   DOTNET_VERSION: '8.X'
   BUILD_CONFIGURATION: 'Release'
